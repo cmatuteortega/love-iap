@@ -1,0 +1,32 @@
+# Adds love-iap's Google Play Billing bridge to a love-android checkout, between
+# checking out love-android and running gradle:
+#
+#   - uses: cmatuteortega/love-iap@v1
+#     with:
+#       love-android-path: love-android
+#
+# The game itself still needs iap.lua inside its .love (see README.md).
+name: love-iap (Android)
+description: Add in-app purchases (Google Play Billing) to a love-android build.
+branding:
+  icon: shopping-cart
+  color: purple
+
+inputs:
+  love-android-path:
+    description: Path to the love-android checkout, relative to the workspace.
+    required: true
+  billing-version:
+    description: Play Billing Library version (com.android.billingclient:billing).
+    required: false
+    default: '9.1.0'
+
+runs:
+  using: composite
+  steps:
+    - name: Add love-iap to love-android
+      shell: bash
+      env:
+        LA: ${{ inputs.love-android-path }}
+        BILLING: ${{ inputs.billing-version }}
+      run: '"$GITHUB_ACTION_PATH/android/install.sh" "$LA" "$BILLING"'

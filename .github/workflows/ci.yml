@@ -1,0 +1,141 @@
+# Two jobs:
+#
+#   check  every push, a minute: iap.lua's tests against a fake native store
+#          (test/run.lua), LoveIap.java compiled against the real Play Billing
+#          and android.jar, liap.cpp syntax-checked.
+#   apk    the real thing: love-android with this repo's action applied, the
+#          example game embedded, and the APK checked for libliap.so and the
+#          LoveIap class. Slow on a cold cache; uploaded as "love-iap example"
+#          for sideloading (the store says "unavailable" until the app is on a
+#          Play Console track -- see README).
+
+name: CI
+
+on:
+  push:
+    branches: ['**']
+    paths-ignore: ['**.md']
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Same pin as the games that use this; bump on purpose.
+  LOVE_ANDROID_REF: 4c65fff4f8b38693aca5d91bc06f254f86a97adf
+  BILLING_VERSION: 9.1.0
+  ANDROID_PLATFORM: platform-35_r02
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: iap.lua tests
+        run: |
+          sudo apt-get install -y -qq luajit > /dev/null
+          cc -shared -fPIC -o test/libliap.so test/fake_liap.c
+          LD_LIBRARY_PATH=test luajit test/run.lua
+          luajit -bl example/main.lua > /dev/null
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - name: LoveIap.java against Play Billing ${{ env.BILLING_VERSION }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/sdk" && cd "$RUNNER_TEMP/sdk"
+          curl -sSfLO "https://dl.google.com/android/maven2/com/android/billingclient/billing/$BILLING_VERSION/billing-$BILLING_VERSION.aar"
+          unzip -oq "billing-$BILLING_VERSION.aar" classes.jar -d billing
+          curl -sSfLO "https://dl.google.com/android/repository/$ANDROID_PLATFORM.zip"
+          unzip -oq "$ANDROID_PLATFORM.zip" '*/android.jar' -d platform
+          javac -Xlint:all -Xlint:-options -Werror -source 8 -target 8 \
+            -cp "$(ls platform/*/android.jar):billing/classes.jar" -d out \
+            "$GITHUB_WORKSPACE"/android/love-iap/java/com/cmatute/loveiap/LoveIap.java
+
+      - name: liap.cpp syntax
+        run: |
+          jdk=$(dirname "$(dirname "$(readlink -f "$(which javac)")")")
+          clang++ -std=c++11 -Wall -Wextra -Werror -Wno-missing-field-initializers -fsyntax-only \
+            -I"$jdk/include" -I"$jdk/include/linux" android/love-iap/liap.cpp
+
+  apk:
+    needs: check
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: love-iap
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      - name: Checkout LÖVE for Android
+        uses: actions/checkout@v4
+        with:
+          repository: love2d/love-android
+          ref: ${{ env.LOVE_ANDROID_REF }}
+          path: love-android
+          submodules: recursive
+
+      # What a game's workflow does: one step.
+      - name: Add love-iap
+        uses: ./love-iap
+        with:
+          love-android-path: love-android
+          billing-version: ${{ env.BILLING_VERSION }}
+
+      - name: Android NDK and CMake
+        working-directory: love-android
+        run: |
+          ndk=$(sed -n "s/.*ndkVersion '\([^']*\)'.*/\1/p" app/build.gradle)
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "ndk;$ndk" "cmake;3.22.1" > /dev/null
+
+      - uses: hendrikmuhs/ccache-action@v1.2
+        with:
+          key: love-android-${{ env.LOVE_ANDROID_REF }}
+          max-size: 2G
+
+      - name: Configure LÖVE for Android
+        working-directory: love-android
+        run: |
+          sed -i '/^app\.name_byte_array=/d; /^#\?app\.name=/d; /^app\.application_id=/d' gradle.properties
+          { echo "app.name=love-iap example"; echo "app.application_id=com.cmatute.loveiap.example"; } >> gradle.properties
+          sed -i "s/abiFilters 'armeabi-v7a', 'arm64-v8a', 'x86_64'/abiFilters 'arm64-v8a'/" app/build.gradle
+          sed -i 's/arguments "-DANDROID_STL=c++_shared",/arguments "-DANDROID_STL=c++_shared", "-DCMAKE_C_COMPILER_LAUNCHER=ccache", "-DCMAKE_CXX_COMPILER_LAUNCHER=ccache",/' app/build.gradle
+
+      - name: Package the example
+        run: |
+          mkdir -p love-android/app/src/embed/assets
+          cp love-iap/iap.lua love-iap/example/
+          (cd love-iap/example && zip -9 -r ../../love-android/app/src/embed/assets/game.love .)
+
+      - name: Build APK
+        working-directory: love-android
+        run: ./gradlew assembleEmbedNoRecordDebug --stacktrace
+
+      - name: Check the APK
+        run: |
+          apk=$(ls love-android/app/build/outputs/apk/embedNoRecord/debug/*.apk | head -1)
+          echo "APK=$apk" >> "$GITHUB_ENV"
+          unzip -l "$apk" | grep -E 'lib/arm64-v8a/lib(liap|love|SDL3)\.so'
+          unzip -l "$apk" | grep -q 'lib/arm64-v8a/libliap.so' || { echo "::error::libliap.so is not in the APK"; exit 1; }
+          unzip -p "$apk" 'classes*.dex' | grep -aq 'Lcom/cmatute/loveiap/LoveIap;' || { echo "::error::LoveIap is not in the APK"; exit 1; }
+          unzip -p "$apk" 'classes*.dex' | grep -aq 'Lcom/android/billingclient/api/BillingClient;' || { echo "::error::Play Billing is not in the APK"; exit 1; }
+          echo "libliap.so, LoveIap and Play Billing are all in the APK"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: love-iap example
+          path: ${{ env.APK }}
+          if-no-files-found: error
