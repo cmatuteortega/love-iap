@@ -128,12 +128,23 @@ push("syncing") push("synced")
 iap.update()
 check("revoke=false keeps ownership", iap.owns("full"))
 
--- onPurchase returning false leaves the purchase unfinished
+-- onPurchase returning false leaves the purchase unfinished, for iap.finish
+files = {}
 start { onPurchase = function() return false end }
 calls()
 push("purchase", "coins", "tok3", "purchased", "0", "1", "")
 iap.update()
-check("refused grant is not finished", calls() == "" and not files["iap.txt"]:find("tok3"))
+check("refused grant is not finished", calls() == "" and not (files["iap.txt"] or ""):find("tok3"))
+iap.finish("coins", "tok3")
+check("finish consumes a refused consumable", calls() == "finish tok3 1\n" and not (files["iap.txt"] or ""):find("tok3"))
+push("purchase", "full", "tokG", "purchased", "0", "1", "")
+iap.update()
+check("refused non-consumable not owned yet", calls() == "" and not iap.owns("full"))
+iap.finish("full", "tokG")
+check("finish acknowledges and owns", calls() == "finish tokG 0\n" and iap.owns("full"))
+iap.finish("nope", "tokN")
+iap.finish("coins", "")
+check("finish ignores unknown ids and empty tokens", calls() == "")
 
 -- Pending, failures, strangers
 start()
@@ -160,7 +171,7 @@ check("mock is available with prices", iap.available() and iap.price("full") == 
 iap.buy("full")
 iap.update()
 iap.update()
-local s = said() check("mock purchase grants", s == "grant full mock-1" and iap.owns("full"))
+local s = said() check("mock purchase grants", s:match("^grant full mock%-%d+%-1$") and iap.owns("full"))
 check("mock status survives ready", iap.status() == "mock")
 iap.restore()
 iap.update()

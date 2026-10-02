@@ -20,6 +20,12 @@
 -- grant a consumable twice; the token on `purchase.token` is there for a game
 -- that wants to keep its own ledger and make that exactly-once.
 --
+-- **A game that grants on its own server** returns false from onPurchase,
+-- sends purchase.token to the server, and calls iap.finish(id, token) once
+-- the server has granted it. Until then the purchase stays unfinished and
+-- comes back at the next launch, so the server's own record of tokens is
+-- what keeps it from being granted twice.
+--
 -- **Non-consumables are remembered here**, in a small file in the save
 -- directory, so iap.owns() answers offline and on the first frame. Each full
 -- sync with the store (every launch on Android, iap.restore() on iOS) makes
@@ -353,10 +359,27 @@ function iap.buy(id)
         native.liap_buy(id)
     elseif mocking then
         mockCount = mockCount + 1
-        mockQueue[#mockQueue + 1] = { "purchase", id, "mock-" .. mockCount, "purchased", "0", "1", "" }
+        -- Unique across launches too, so a server that keeps a ledger of
+        -- tokens does not mistake the next session's mock-1 for a replay.
+        local token = ("mock-%d-%d"):format(os.time(), mockCount)
+        mockQueue[#mockQueue + 1] = { "purchase", id, token, "purchased", "0", "1", "" }
     else
         call("onFail", id, "unavailable")
     end
+end
+
+--- Finish a purchase that onPurchase left unfinished (by returning false),
+--  once the game has granted it some other way -- typically on its server.
+--  Consumables are consumed; non-consumables are recorded as owned and
+--  acknowledged. Nothing is granted here and onPurchase does not run again.
+function iap.finish(id, token)
+    local def = defs[id]
+    if not def or not token or token == "" then return end
+    if not def.consumable and not saved.owned[id] then
+        saved.owned[id] = true
+        writeSaved()
+    end
+    finish(token, def.consumable)
 end
 
 --- Ask the store for everything this account owns. Required on iOS behind a

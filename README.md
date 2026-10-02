@@ -183,6 +183,11 @@ purchases** button. Wire one to `iap.restore()`.
 
 - `iap.update()`: call every frame. Callbacks only run from inside it.
 - `iap.buy(id)`: opens the store's purchase sheet. The result arrives later.
+- `iap.finish(id, token)`: finishes a purchase that `onPurchase` left
+  unfinished by returning `false`. For games that grant on their own server:
+  send `purchase.token` there, and call this once the server has granted it.
+  Until then the store hands the purchase back at every launch, so the server
+  must remember tokens it has already granted.
 - `iap.restore()`: asks the store for everything this account owns.
 - `iap.owns(id)`: whether a non-consumable is owned.
 - `iap.product(id)`: `{ id, consumable, price, title, description, currency, micros }`,
